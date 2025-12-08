@@ -42,7 +42,9 @@ services:
       - monitoring
     ports:
       - "3100:3100"
-    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml
+    command: -config.file=/etc/loki/loki.yml
     restart: unless-stopped
 
   promtail:
