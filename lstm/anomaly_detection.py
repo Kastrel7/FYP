@@ -7,15 +7,20 @@ import matplotlib.pyplot as plt
 from tensorflow.keras.models import load_model
 
 WINDOW_SIZE = 30
-PREDICTION_HORIZON = 12  # 12 steps x 5 seconds = 60 seconds ahead
+PREDICTION_HORIZON = 12
+
+THRESHOLD_CPU     = 75 
+THRESHOLD_MEMORY  = 70 
+THRESHOLD_NET_RX  = 10000 
+THRESHOLD_NET_TX  = 50000 
 
 model = load_model("lstm_model.keras")
 scaler = joblib.load("scaler.pkl")
 FEATURES = joblib.load("feature_order.pkl")
 threshold_info = joblib.load("threshold_info.pkl")
-THRESHOLD = threshold_info["threshold"]
+LSTM_THRESHOLD = threshold_info["threshold"]
 
-print(f"Loaded threshold: {THRESHOLD:.6f}")
+print(f"Loaded LSTM threshold: {LSTM_THRESHOLD:.6f}")
 
 def flatten_entry(entry):
     row = {}
@@ -42,6 +47,32 @@ def load_jsonl(path):
             except:
                 pass
     return entries
+
+def check_thresholds(entry):
+    """
+    Check a single entry against static threshold rules.
+    Returns a list of breached metric names, empty if all clear.
+    """
+    breaches = []
+    host = entry.get("host", {})
+
+    cpu = host.get("cpu_percent")
+    if cpu is not None and cpu > THRESHOLD_CPU:
+        breaches.append(f"CPU({cpu}%)")
+
+    memory = host.get("memory_usage")
+    if memory is not None and memory > THRESHOLD_MEMORY:
+        breaches.append(f"MEM({memory}%)")
+
+    net_rx = host.get("net_rx")
+    if net_rx is not None and net_rx > THRESHOLD_NET_RX:
+        breaches.append(f"NET_RX({net_rx}B/s)")
+
+    net_tx = host.get("net_tx")
+    if net_tx is not None and net_tx > THRESHOLD_NET_TX:
+        breaches.append(f"NET_TX({net_tx}B/s)")
+
+    return breaches
 
 def predict_ahead_single(window, horizon):
     """
@@ -110,24 +141,50 @@ def compute_scores_batch(windows):
     print(f"Scored {len(windows)} windows in batch mode")
     return scores
 
-def write_anomalies(scores, timestamps, outfile="anomalies.log"):
-    anomaly_count = 0
+def write_anomalies(scores, timestamps, entries, outfile="anomalies.log"):
+    lstm_count = 0
+    threshold_count = 0
+    hybrid_count = 0
+
+    aligned_entries = entries[WINDOW_SIZE:]
 
     with open(outfile, "w") as f:
         for i, score in enumerate(scores):
-            if score > THRESHOLD:
-                ts = timestamps[i]
-                f.write(f"{ts} | score={score:.6f} | predicted_anomaly_in_60s -> ANOMALY\n")
-                anomaly_count += 1
+            ts = timestamps[i]
+            entry = aligned_entries[i] if i < len(aligned_entries) else {}
 
-        f.write(f"\nFinished anomaly scan. {anomaly_count} anomalies detected.\n")
+            lstm_alert = score > LSTM_THRESHOLD
+            breaches = check_thresholds(entry)
+            threshold_alert = len(breaches) > 0
+            breach_str = ", ".join(breaches) if breaches else "CLEAR"
 
-    print(f"Anomalies written to {outfile} ({anomaly_count} detected)")
+            if lstm_alert and threshold_alert:
+                status = "HYBRID_ALERT"
+                hybrid_count += 1
+            elif lstm_alert:
+                status = "LSTM_ANOMALY"
+                lstm_count += 1
+            elif threshold_alert:
+                status = "THRESHOLD_ALERT"
+                threshold_count += 1
+            else:
+                continue
+
+            f.write(f"{ts} | lstm_score={score:.6f} | threshold={breach_str} | -> {status}\n")
+
+        f.write(f"\nFinished anomaly scan.\n")
+        f.write(f"LSTM only:      {lstm_count}\n")
+        f.write(f"Threshold only: {threshold_count}\n")
+        f.write(f"Hybrid alerts:  {hybrid_count}\n")
+        f.write(f"Total:          {lstm_count + threshold_count + hybrid_count}\n")
+
+    print(f"Anomalies written to {outfile}")
+    print(f"LSTM only: {lstm_count} | Threshold only: {threshold_count} | Hybrid: {hybrid_count}")
 
 def plot_scores(scores, outfile="anomaly_scores.png"):
     plt.figure(figsize=(14, 5))
     plt.plot(scores, label="Anomaly Score (1 min ahead)")
-    plt.axhline(THRESHOLD, color="red", linestyle="--", linewidth=2, label=f"Threshold ({THRESHOLD:.4f})")
+    plt.axhline(LSTM_THRESHOLD, color="red", linestyle="--", linewidth=2, label=f"LSTM Threshold ({LSTM_THRESHOLD:.4f})")
     plt.title("Predicted Anomaly Scores Over Time (60 Second Lookahead)")
     plt.xlabel("Window Index")
     plt.ylabel("Predicted Reconstruction Error")
@@ -154,9 +211,9 @@ if __name__ == "__main__":
     else:
         scores = compute_scores_single(windows)
 
-    print(f"Threshold: {THRESHOLD:.6f}")
+    print(f"LSTM Threshold: {LSTM_THRESHOLD:.6f}")
     print(f"Max score: {scores.max():.6f}")
     print(f"Mean score: {scores.mean():.6f}")
 
-    write_anomalies(scores, timestamps)
+    write_anomalies(scores, timestamps, entries)
     plot_scores(scores)
