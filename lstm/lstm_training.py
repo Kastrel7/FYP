@@ -1,4 +1,5 @@
 import json
+import argparse
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
@@ -8,7 +9,7 @@ import matplotlib.pyplot as plt
 import joblib
 
 WINDOW_SIZE = 30
-DATA_FILE = "dataset.jsonl"
+PREDICTION_HORIZON = 12
 
 def load_jsonl(path):
     entries = []
@@ -20,13 +21,17 @@ def load_jsonl(path):
                 pass
     return entries
 
-entries = load_jsonl(DATA_FILE)
+parser = argparse.ArgumentParser(description="Train LSTM model on a JSONL dataset")
+parser.add_argument("-i", "--input", default="dataset.jsonl", help="Input JSONL file (default: dataset.jsonl)")
+args = parser.parse_args()
+
+print(f"Loading data from {args.input}...")
+entries = load_jsonl(args.input)
 
 host_features = set()
 container_features = set()
 
 for entry in entries:
-
     for hk in entry.get("host", {}).keys():
         host_features.add(f"host_{hk}")
 
@@ -59,10 +64,8 @@ def flatten(entry):
 
     return row
 
-
 rows = [flatten(e) for e in entries]
 df = pd.DataFrame(rows, columns=ALL_FEATURES)
-
 df = df.replace([np.inf, -np.inf], np.nan).fillna(0)
 
 constant = df.nunique()
@@ -111,6 +114,37 @@ history = model.fit(
 )
 
 model.save("lstm_model.keras")
+
+def predict_ahead_batch(windows, horizon):
+    """
+    Recursively predict horizon steps ahead for all windows at once.
+    Same logic as anomaly_detection.py so the threshold is calculated
+    using identical scoring to what detection will use.
+    """
+    current_windows = np.array(windows).copy()
+
+    for _ in range(horizon):
+        next_steps = model.predict(current_windows, verbose=0)
+        current_windows = np.roll(current_windows, -1, axis=1)
+        current_windows[:, -1, :] = next_steps
+
+    return next_steps
+
+print("Calculating threshold from training data using recursive predictions...")
+train_predictions = predict_ahead_batch(X_train, PREDICTION_HORIZON)
+train_scores = np.mean(np.abs(train_predictions), axis=1)
+
+threshold_mean = float(np.mean(train_scores))
+threshold_std = float(np.std(train_scores))
+threshold = threshold_mean + 3 * threshold_std
+
+joblib.dump({
+    "mean": threshold_mean,
+    "std": threshold_std,
+    "threshold": threshold
+}, "threshold_info.pkl")
+
+print(f"Threshold saved: {threshold:.6f} (mean={threshold_mean:.6f}, std={threshold_std:.6f})")
 
 plt.plot(history.history["loss"], label="train_loss")
 plt.plot(history.history["val_loss"], label="val_loss")

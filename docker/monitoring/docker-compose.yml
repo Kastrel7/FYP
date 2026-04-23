@@ -33,6 +33,18 @@ services:
     labels:
       org.label-schema.group: "monitoring"
     restart: unless-stopped
+    
+  node_exporter:
+    image: prom/node-exporter:latest
+    container_name: node_exporter
+    hostname: node_exporter
+    networks:
+      - monitoring
+    ports:
+      - "9100:9100"
+    command:
+      - '--collector.processes'
+    restart: unless-stopped
 
   loki:
     image: grafana/loki:latest

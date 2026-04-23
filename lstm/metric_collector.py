@@ -1,13 +1,12 @@
 import time
 import json
+import argparse
 from datetime import datetime, timezone
 
 import requests
 import docker
 
 PROM_URL = "http://localhost:9090/api/v1/query"
-LOKI_URL = "http://localhost:3100/loki/api/v1/query_range"
-OUTPUT_FILE = "dataset.jsonl"
 SAMPLE_INTERVAL_SECONDS = 5
 
 MONITORING_STACK = "monitoring"
@@ -59,11 +58,7 @@ def get_container_metrics(container_id):
     """
     cAdvisor exposes containers as:
     /system.slice/docker-<cid>.scope
-
-    So we must match:
-    id=~".*/system.slice/docker-<cid>.*\\.scope"
     """
-    
     container_system_slice = f'/system.slice/docker-{container_id}.scope'
 
     cpu = prom_query(
@@ -95,12 +90,8 @@ def get_container_metrics(container_id):
         "net_tx": r(net_tx),
     }
 
-def fetch_container_logs_from_loki(container_name, seconds=5):
-    return []
-
 def get_docker_client():
     return docker.DockerClient(base_url="unix:///var/run/docker.sock")
-
 
 def discover_active_containers(client):
     """Return all non-monitoring containers."""
@@ -123,12 +114,7 @@ def collect_sample(client):
 
     for name, obj in containers.items():
         metrics = get_container_metrics(obj.id)
-        logs = fetch_container_logs_from_loki(name, seconds=SAMPLE_INTERVAL_SECONDS)
-
-        container_data[name] = {
-            "metrics": metrics,
-            "logs": logs,
-        }
+        container_data[name] = {"metrics": metrics}
 
     return {
         "timestamp": ts,
@@ -136,22 +122,25 @@ def collect_sample(client):
         "host": host_metrics,
         "containers": container_data,
     }
-    
+
 def r(x):
     return round(x, 2) if x is not None else None
 
 def main():
+    parser = argparse.ArgumentParser(description="Collect container and host metrics into a JSONL dataset")
+    parser.add_argument("-o", "--output", default="dataset.jsonl", help="Output JSONL file (default: dataset.jsonl)")
+    args = parser.parse_args()
+
     client = get_docker_client()
-    print(f"Collecting metrics every {SAMPLE_INTERVAL_SECONDS}s…")
+    print(f"Collecting metrics every {SAMPLE_INTERVAL_SECONDS}s -> {args.output}")
 
     while True:
         sample = collect_sample(client)
 
-        with open(OUTPUT_FILE, "a") as f:
+        with open(args.output, "a") as f:
             f.write(json.dumps(sample) + "\n")
 
         time.sleep(SAMPLE_INTERVAL_SECONDS)
-
 
 if __name__ == "__main__":
     main()
