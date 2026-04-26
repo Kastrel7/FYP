@@ -1,4 +1,5 @@
 import json
+import time
 import argparse
 import numpy as np
 import pandas as pd
@@ -9,10 +10,10 @@ from tensorflow.keras.models import load_model
 WINDOW_SIZE = 30
 PREDICTION_HORIZON = 12
 
-THRESHOLD_CPU     = 75 
-THRESHOLD_MEMORY  = 70 
-THRESHOLD_NET_RX  = 10000 
-THRESHOLD_NET_TX  = 50000 
+THRESHOLD_CPU     = 75
+THRESHOLD_MEMORY  = 70
+THRESHOLD_NET_RX  = 10000
+THRESHOLD_NET_TX  = 50000
 
 model = load_model("lstm_model.keras")
 scaler = joblib.load("scaler.pkl")
@@ -49,10 +50,6 @@ def load_jsonl(path):
     return entries
 
 def check_thresholds(entry):
-    """
-    Check a single entry against static threshold rules.
-    Returns a list of breached metric names, empty if all clear.
-    """
     breaches = []
     host = entry.get("host", {})
 
@@ -75,10 +72,6 @@ def check_thresholds(entry):
     return breaches
 
 def predict_ahead_single(window, horizon):
-    """
-    Recursively predict horizon steps ahead for a single window.
-    Best for live use where you score one window at a time.
-    """
     current_window = window.copy()
 
     for _ in range(horizon):
@@ -90,10 +83,6 @@ def predict_ahead_single(window, horizon):
     return next_step
 
 def predict_ahead_batch(windows, horizon):
-    """
-    Recursively predict horizon steps ahead for all windows at once.
-    Best for pre-collected files where you want speed.
-    """
     current_windows = np.array(windows).copy()
 
     for _ in range(horizon):
@@ -121,12 +110,31 @@ def build_sequences(entries):
 
     return windows, timestamps
 
+def score_window(window):
+    prediction = predict_ahead_single(window, PREDICTION_HORIZON)
+    return float(np.mean(np.abs(prediction)))
+
+def get_alert_status(score, breaches):
+    lstm_alert = score > LSTM_THRESHOLD
+    threshold_alert = len(breaches) > 0
+
+    if lstm_alert and threshold_alert:
+        return "HYBRID_ALERT"
+    elif lstm_alert:
+        return "LSTM_ANOMALY"
+    elif threshold_alert:
+        return "THRESHOLD_ALERT"
+    return None
+
+def format_alert_line(ts, score, breaches, status):
+    breach_str = ", ".join(breaches) if breaches else "CLEAR"
+    return f"{ts} | lstm_score={score:.6f} | threshold={breach_str} | -> {status}"
+
 def compute_scores_single(windows):
     scores = []
 
     for i, window in enumerate(windows):
-        prediction = predict_ahead_single(window, PREDICTION_HORIZON)
-        score = float(np.mean(np.abs(prediction)))
+        score = score_window(window)
         scores.append(score)
 
         if (i + 1) % 50 == 0:
@@ -153,24 +161,20 @@ def write_anomalies(scores, timestamps, entries, outfile="anomalies.log"):
             ts = timestamps[i]
             entry = aligned_entries[i] if i < len(aligned_entries) else {}
 
-            lstm_alert = score > LSTM_THRESHOLD
             breaches = check_thresholds(entry)
-            threshold_alert = len(breaches) > 0
-            breach_str = ", ".join(breaches) if breaches else "CLEAR"
+            status = get_alert_status(score, breaches)
 
-            if lstm_alert and threshold_alert:
-                status = "HYBRID_ALERT"
-                hybrid_count += 1
-            elif lstm_alert:
-                status = "LSTM_ANOMALY"
-                lstm_count += 1
-            elif threshold_alert:
-                status = "THRESHOLD_ALERT"
-                threshold_count += 1
-            else:
+            if status is None:
                 continue
 
-            f.write(f"{ts} | lstm_score={score:.6f} | threshold={breach_str} | -> {status}\n")
+            f.write(format_alert_line(ts, score, breaches, status) + "\n")
+
+            if status == "HYBRID_ALERT":
+                hybrid_count += 1
+            elif status == "LSTM_ANOMALY":
+                lstm_count += 1
+            elif status == "THRESHOLD_ALERT":
+                threshold_count += 1
 
         f.write(f"\nFinished anomaly scan.\n")
         f.write(f"LSTM only:      {lstm_count}\n")
@@ -193,27 +197,91 @@ def plot_scores(scores, outfile="anomaly_scores.png"):
     plt.savefig(outfile)
     print(f"Plot saved to {outfile}")
 
+def run_live(path, outfile="anomalies.log"):
+    print(f"Live mode started. Watching {path}...")
+    print(f"Waiting for {WINDOW_SIZE} entries before scoring...")
+
+    with open(outfile, "w") as f:
+        f.write(f"Live anomaly detection started.\n")
+        f.write(f"LSTM threshold: {LSTM_THRESHOLD:.6f}\n")
+        f.write(f"CPU threshold:  {THRESHOLD_CPU}%\n")
+        f.write(f"MEM threshold:  {THRESHOLD_MEMORY}%\n")
+        f.write(f"NET_RX threshold: {THRESHOLD_NET_RX} B/s\n")
+        f.write(f"NET_TX threshold: {THRESHOLD_NET_TX} B/s\n\n")
+
+    last_scored_index = -1
+
+    while True:
+        entries = load_jsonl(path)
+        total = len(entries)
+
+        if total <= WINDOW_SIZE:
+            print(f"\rWaiting for enough data... ({total}/{WINDOW_SIZE} entries)", end="", flush=True)
+            time.sleep(5)
+            continue
+
+        if last_scored_index == -1:
+            print(f"\nEnough data collected. Scoring started.")
+
+        latest_index = total - WINDOW_SIZE - 1
+
+        if latest_index <= last_scored_index:
+            time.sleep(5)
+            continue
+
+        for i in range(last_scored_index + 1, latest_index + 1):
+            window_entries = entries[i:i+WINDOW_SIZE]
+            current_entry = entries[i+WINDOW_SIZE]
+            ts = current_entry.get("timestamp_iso") or current_entry.get("timestamp")
+
+            flattened = [flatten_entry(e) for e in window_entries]
+            df = pd.DataFrame(flattened, columns=FEATURES)
+            df = df.replace([np.inf, -np.inf], np.nan).fillna(0)
+            scaled = scaler.transform(df)
+            window = scaled
+
+            score = score_window(window)
+            breaches = check_thresholds(current_entry)
+            status = get_alert_status(score, breaches)
+
+            if status is not None:
+                line = format_alert_line(ts, score, breaches, status)
+                print(line)
+                with open(outfile, "a") as f:
+                    f.write(line + "\n")
+
+        last_scored_index = latest_index
+        time.sleep(5)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run anomaly detection against a JSONL dataset")
     parser.add_argument("-i", "--input", required=True, help="Path to the JSONL dataset file")
     parser.add_argument("-b", "--batch", action="store_true", help="Use batch mode for faster scoring of large files")
+    parser.add_argument("--live", action="store_true", help="Run in live mode, continuously watching the input file")
     args = parser.parse_args()
+
+    if args.live and args.batch:
+        print("Error: --live and --batch cannot be used together.")
+        exit(1)
 
     entries = load_jsonl(args.input)
     print(f"Loaded {len(entries)} entries from {args.input}")
 
-    windows, timestamps = build_sequences(entries)
-    print(f"Built {len(windows)} windows")
-    print(f"Mode: {'batch' if args.batch else 'single'}")
-
-    if args.batch:
-        scores = compute_scores_batch(windows)
+    if args.live:
+        run_live(args.input)
     else:
-        scores = compute_scores_single(windows)
+        windows, timestamps = build_sequences(entries)
+        print(f"Built {len(windows)} windows")
+        print(f"Mode: {'batch' if args.batch else 'single'}")
 
-    print(f"LSTM Threshold: {LSTM_THRESHOLD:.6f}")
-    print(f"Max score: {scores.max():.6f}")
-    print(f"Mean score: {scores.mean():.6f}")
+        if args.batch:
+            scores = compute_scores_batch(windows)
+        else:
+            scores = compute_scores_single(windows)
 
-    write_anomalies(scores, timestamps, entries)
-    plot_scores(scores)
+        print(f"LSTM Threshold: {LSTM_THRESHOLD:.6f}")
+        print(f"Max score: {scores.max():.6f}")
+        print(f"Mean score: {scores.mean():.6f}")
+
+        write_anomalies(scores, timestamps, entries)
+        plot_scores(scores)
