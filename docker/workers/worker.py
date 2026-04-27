@@ -11,16 +11,6 @@ MEM_MAX = float(os.environ.get("MEM_MAX", 30))
 CHANGE_INTERVAL = float(os.environ.get("CHANGE_INTERVAL", 20))
 CORES = int(float(os.environ.get("CORES", multiprocessing.cpu_count())))
 
-def mem_burner(target_percent, duration):
-    total_ram = psutil.virtual_memory().total
-    target_bytes = int(total_ram * (target_percent / 100))
-
-    end = time.time() + duration
-    chunk = bytearray(target_bytes)
-    while time.time() < end:
-        time.sleep(0.1)
-    del chunk
-
 def cpu_burn(target_percent, duration):
     end = time.time() + duration
     while time.time() < end:
@@ -28,6 +18,15 @@ def cpu_burn(target_percent, duration):
         while time.time() < busy_end:
             pass
         time.sleep(1 - (target_percent / 100))
+
+def mem_burner(target_percent, duration):
+    total_ram = psutil.virtual_memory().total
+    target_bytes = int(total_ram * (target_percent / 100))
+    end = time.time() + duration
+    chunk = bytearray(target_bytes)
+    while time.time() < end:
+        time.sleep(0.1)
+    del chunk
 
 def stress(cpu_percent, mem_percent, duration=20):
     cpu_cores = int(CORES)

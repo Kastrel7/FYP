@@ -33,20 +33,15 @@ def get_host_metrics_prometheus():
     cpu = prom_query(
         'clamp_min(100 - (avg by(instance)(rate(node_cpu_seconds_total{mode="idle"}[30s])) * 100), 0)'
     )
-
     memory_usage = prom_query(
         '(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes)'
     )
-    
     memory_limit = prom_query('node_memory_MemTotal_bytes')
-
     net_rx = prom_query('sum(rate(node_network_receive_bytes_total[30s]))')
     net_tx = prom_query('sum(rate(node_network_transmit_bytes_total[30s]))')
-    
     memory_percent = None
     if memory_usage is not None and memory_limit and memory_limit > 0:
         memory_percent = (memory_usage / memory_limit) * 100
-
     return {
         "cpu_percent": r(cpu),
         "memory_usage": r(memory_percent),
@@ -57,7 +52,6 @@ def get_host_metrics_prometheus():
 def get_container_metrics(container_id):
     num_cores = multiprocessing.cpu_count()
     container_system_slice = f'/system.slice/docker-{container_id}.scope'
-
     cpu = prom_query(
         f'rate(container_cpu_usage_seconds_total{{id="{container_system_slice}"}}[30s]) * 100'
     )
