@@ -31,7 +31,7 @@ def prom_query(query):
 
 def get_host_metrics_prometheus():
     cpu = prom_query(
-        '100 - (avg by(instance)(rate(node_cpu_seconds_total{mode="idle"}[30s])) * 100)'
+        'clamp_min(100 - (avg by(instance)(rate(node_cpu_seconds_total{mode="idle"}[30s])) * 100), 0)'
     )
 
     memory_usage = prom_query(

@@ -1,0 +1,22 @@
+services:
+  workload_a:
+    build: .
+    container_name: workload_a
+    restart: unless-stopped
+    environment:
+      - CPU_MIN=15
+      - CPU_MAX=45
+      - MEM_MIN=5
+      - MEM_MAX=10
+      - CHANGE_INTERVAL=20
+
+  workload_b:
+    build: .
+    container_name: workload_b
+    restart: unless-stopped
+    environment:
+      - CPU_MIN=5
+      - CPU_MAX=25
+      - MEM_MIN=15
+      - MEM_MAX=40
+      - CHANGE_INTERVAL=20
