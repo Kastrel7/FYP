@@ -30,6 +30,10 @@ docker/
         prometheus/
             prometheus.yml
         docker-compose.yml
+    workers/
+        worker.py
+        Dockerfile
+        docker-compose.yml
 
 lstm/
     metric_collector.py
@@ -66,6 +70,11 @@ python3 metric_collector.py -o normal.jsonl
 ```
 
 Each sample is written as a single line to the output file every 5 seconds. The script automatically discovers all running non-monitoring containers and collects CPU, memory, and network metrics for each one alongside host-level metrics.
+For a more realistic baseline, you can run the worker containers during collection. From the docker/workers folder:
+```bash
+docker compose up --build -d
+```
+This starts two containers (workload_a and workload_b) that continuously vary their CPU and memory usage within different ranges every 20 seconds, giving the dataset a realistic spread of container behaviour rather than flat idle values.
 
 ---
 
