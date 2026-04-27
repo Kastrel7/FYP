@@ -1,3 +1,4 @@
+import multiprocessing
 import time
 import json
 import argparse
@@ -12,7 +13,6 @@ SAMPLE_INTERVAL_SECONDS = 5
 MONITORING_STACK = "monitoring"
 
 def prom_query(query):
-    """Run a PromQL query and return the scalar value, or None."""
     try:
         r = requests.get(PROM_URL, params={"query": query}, timeout=3)
         r.raise_for_status()
@@ -55,15 +55,14 @@ def get_host_metrics_prometheus():
     }
 
 def get_container_metrics(container_id):
-    """
-    cAdvisor exposes containers as:
-    /system.slice/docker-<cid>.scope
-    """
+    num_cores = multiprocessing.cpu_count()
     container_system_slice = f'/system.slice/docker-{container_id}.scope'
 
     cpu = prom_query(
         f'rate(container_cpu_usage_seconds_total{{id="{container_system_slice}"}}[30s]) * 100'
     )
+    if cpu is not None:
+        cpu = cpu / num_cores
 
     memory_usage = prom_query(
         f'container_memory_usage_bytes{{id="{container_system_slice}"}}'
@@ -94,7 +93,6 @@ def get_docker_client():
     return docker.DockerClient(base_url="unix:///var/run/docker.sock")
 
 def discover_active_containers(client):
-    """Return all non-monitoring containers."""
     result = {}
     for c in client.containers.list():
         project = c.labels.get("com.docker.compose.project", "").lower()
