@@ -209,6 +209,4 @@ __marimo__/
 # LSTM Files
 *.pkl
 *.keras
-training_loss.png
-anomaly_scores.png
-collect_stressed.sh
+*.png
