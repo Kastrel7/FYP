@@ -2,15 +2,15 @@
 
 A hybrid anomaly detection system that collects real Docker container and host metrics, trains an LSTM neural network on normal behaviour, and detects unusual activity using both machine learning and threshold-based rules simultaneously.
 
-The system supports live detection mode, where alerts are printed to the terminal in real time as new data arrives, and file mode for scoring pre-collected datasets.
+The system scores pre-collected JSONL datasets and produces timestamped anomaly logs and graphs as output.
 
 ---
 
 ## Requirements
 
 - Docker and Docker Compose
-- Python 3.12+
-- WSL (Ubuntu) or a native Linux environment
+- Python 3.12
+- Native Linux environment (tested on Ubuntu 24.04)
 - stress-ng installed on the host (for stress testing only)
 
 Install Python dependencies from inside the `lstm` folder:
@@ -62,25 +62,44 @@ This starts Prometheus, cAdvisor, and Node Exporter. All three run on a shared i
 
 ### Step 2: Collect a Normal Usage Baseline
 
-From the `lstm` folder, start the metric collector and let it run for at least 2 hours under typical system activity. The more varied the activity during collection, the better the model will generalise.
+From the `lstm` folder, start the metric collector and let it run for at least 2 hours with the system under typical load.
 
 ```bash
 cd lstm
 python3 metric_collector.py -o normal.jsonl
 ```
 
-Each sample is written as a single line to the output file every 5 seconds. The script automatically discovers all running non-monitoring containers and collects CPU, memory, and network metrics for each one alongside host-level metrics.
-For a more realistic baseline, you can run the worker containers during collection. From the docker/workers folder:
+For a more realistic baseline, run the worker containers during collection. From the `docker/workers` folder:
+
 ```bash
 docker compose up --build -d
 ```
-This starts two containers (workload_a and workload_b) that continuously vary their CPU and memory usage within different ranges every 20 seconds, giving the dataset a realistic spread of container behaviour rather than flat idle values.
+This starts two containers (`workload_a` and `workload_b`) that continuously vary their CPU and memory usage within defined ranges, giving the dataset a realistic spread of container behaviour.
+A pre-collected dataset is available in the lstm folder as `normal.jsonl`.
 
 ---
 
-### Step 3: Train the LSTM Model
+### Step 3: Collect a Stressed Dataset
 
-Once you have collected enough data, train the model:
+Start the metric collector into a new file, then trigger the stress test from a second terminal while it is running.
+
+#### Terminal 1:
+
+```bash
+python3 metric_collector.py -o stressed.jsonl
+```
+
+#### Terminal 2 (after a few minutes of normal collection):
+```bash
+./stress.sh
+```
+
+Let the collector run for a few minutes after the stress test finishes to capture the recovery period, then stop it with Ctrl+C.
+A pre-collected stressed dataset is available in the `lstm` folder as `stressed.jsonl`.
+
+---
+
+### Step 4: Train the LSTM Model
 
 ```bash
 python3 lstm_training.py -i normal.jsonl
@@ -90,48 +109,34 @@ This will:
 
 - Auto-detect all feature columns from the dataset
 - Drop any features that are constant across the dataset
-- Normalise values using MinMaxScaler
+- Normalise values using MinMaxScaler calibrated to the true 0-100% range
 - Build 30-step sliding windows (150 seconds of history per window)
 - Train a two-layer stacked LSTM for 20 epochs
 - Calculate the anomaly threshold from the training data using recursive 12-step prediction
 - Save the following files to the current directory:
-  - `lstm_model.keras` - the trained model
-  - `scaler.pkl` - the fitted scaler
-  - `feature_order.pkl` - the feature list used during training
-  - `threshold_info.pkl` - the anomaly threshold, mean, and standard deviation
-  - `training_loss.png` - a graph of training and validation loss across epochs
+
+    - `lstm_model.keras` - the trained model
+    - `scaler.pkl` - the fitted scaler
+    - `feature_order.pkl` - the feature list used during training
+    - `feature_std.pkl` - per-feature standard deviations used for score normalisation
+    - `threshold_info.pkl` - the anomaly threshold, mean, and standard deviation
+    - `training_loss.png` - a graph of training and validation loss across epochs
 
 ---
 
-### Step 4: Run Live Detection
-
-Open two terminals inside the `lstm` folder.
-
-**Terminal 1** - start collecting live metrics:
+### Step 5: Run Anomaly Detection
 
 ```bash
-python3 metric_collector.py -o live.jsonl
+python3 anomaly_detection.py -i stressed.jsonl
 ```
 
-**Terminal 2** - start live hybrid detection:
+For faster processing use batch mode:
 
 ```bash
-python3 anomaly_detection.py -i live.jsonl --live
+python3 anomaly_detection.py -i stressed.jsonl -b
 ```
 
-The detection script will wait until 30 entries have been collected before scoring begins, showing progress while it waits. Once scoring starts, any detected anomalies are printed to the terminal immediately and written to `anomalies.log`.
-
----
-
-### Step 5: Run the Stress Test (Optional)
-
-From a third terminal inside the `lstm` folder:
-
-```bash
-./stress.sh
-```
-
-The stress test uses stress-ng to ramp CPU and memory load up gradually across five stages over approximately 5 minutes. It uses all available CPU cores detected via `nproc`. You should start seeing LSTM anomaly alerts in Terminal 2 shortly after the stress test begins, with hybrid alerts appearing as CPU crosses the 75% threshold.
+This scores all windows in the dataset, writes detected anomalies to `anomalies.log`, and saves a graph of anomaly scores over time to `anomaly_scores.png`.
 
 ---
 
@@ -148,28 +153,11 @@ The detection script produces three types of alert:
 Example alert line:
 
 ```
-2026-04-27T10:46:34.852511+00:00 | lstm_score=0.581538 | threshold=CPU(76.37%) | -> HYBRID_ALERT
+2026-04-27T10:46:34.852511+00:00 | lstm_score=882.327765 | threshold=CPU(78.08%) | -> HYBRID_ALERT
 ```
 
 ---
 
-## File Mode (Scoring Pre-Collected Data)
-
-To score a pre-collected JSONL file without live detection:
-
-```bash
-python3 anomaly_detection.py -i stressed.jsonl
-```
-
-For faster processing of large files, use batch mode:
-
-```bash
-python3 anomaly_detection.py -i stressed.jsonl -b
-```
-
-File mode produces `anomalies.log` and `anomaly_scores.png` in the current directory.
-
----
 
 ## Output Files
 

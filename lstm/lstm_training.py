@@ -82,19 +82,14 @@ if constant_features:
     df = df.drop(columns=constant_features)
     ALL_FEATURES = [f for f in ALL_FEATURES if f not in constant_features]
 
-# scaler = MinMaxScaler()
-# scaled = scaler.fit_transform(df)
-
-# Create dummy rows to force the scaler to understand true maximums
 dummy_min = {f: 0.0 for f in ALL_FEATURES}
 dummy_max = {f: 100.0 if 'percent' in f or 'usage' in f else 1000000.0 for f in ALL_FEATURES}
 
-# Temporarily add these extremes to the dataframe to calibrate the scaler
 df_for_scaler = pd.concat([df, pd.DataFrame([dummy_min, dummy_max])], ignore_index=True)
 
 scaler = MinMaxScaler()
-scaler.fit(df_for_scaler)        # Teach the scaler the true 0-100 bounds
-scaled = scaler.transform(df)    # Scale only the actual dataset
+scaler.fit(df_for_scaler)
+scaled = scaler.transform(df)
 
 feature_std = np.std(scaled, axis=0)
 feature_std[feature_std < 1e-6] = 1e-6

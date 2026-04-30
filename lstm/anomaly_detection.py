@@ -198,30 +198,25 @@ def write_anomalies(scores, timestamps, entries, outfile="anomalies.log"):
 def plot_scores(scores, entries, outfile="anomaly_scores.png"):
     aligned_entries = entries[WINDOW_SIZE:]
 
-    # Pull CPU and memory from aligned entries
     cpu_values  = [e.get("host", {}).get("cpu_percent",  0) or 0 for e in aligned_entries[:len(scores)]]
     mem_values  = [e.get("host", {}).get("memory_usage", 0) or 0 for e in aligned_entries[:len(scores)]]
 
-    # Work out alert status for each window
     alert_statuses = []
     for i, score in enumerate(scores):
         entry = aligned_entries[i] if i < len(aligned_entries) else {}
         breaches = check_thresholds(entry)
         alert_statuses.append(get_alert_status(score, breaches))
 
-    # Find anomaly indices
     anomaly_indices = [i for i, s in enumerate(alert_statuses) if s is not None]
 
     if not anomaly_indices:
         print("No anomalies detected, skipping graph.")
         return
 
-    # 5 minutes padding = 60 samples at 5s per sample
     PADDING = 60
     start_idx = max(0, anomaly_indices[0] - PADDING)
     end_idx   = min(len(scores) - 1, anomaly_indices[-1] + PADDING)
 
-    # Slice everything to the window of interest
     scores_slice   = scores[start_idx:end_idx+1]
     cpu_slice      = cpu_values[start_idx:end_idx+1]
     mem_slice      = mem_values[start_idx:end_idx+1]
@@ -231,7 +226,6 @@ def plot_scores(scores, entries, outfile="anomaly_scores.png"):
     fig, ax1 = plt.subplots(figsize=(16, 7))
     fig.suptitle("Hybrid Anomaly Detection Results", fontsize=14, fontweight="bold")
 
-    # --- Left y-axis: CPU and Memory ---
     ax1.plot(x, cpu_slice, color="steelblue", linewidth=1.5, label="CPU %")
     ax1.plot(x, mem_slice, color="darkorange", linewidth=1.5, label="Memory %")
     ax1.axhline(THRESHOLD_CPU,    color="steelblue",  linestyle=":", linewidth=1, alpha=0.7, label=f"CPU Threshold ({THRESHOLD_CPU}%)")
