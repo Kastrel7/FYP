@@ -1,5 +1,3 @@
-import subprocess
-
 import os
 import warnings
 import json
@@ -365,11 +363,3 @@ if __name__ == "__main__":
 
         write_anomalies(scores, timestamps, entries)
         plot_scores(scores, entries)
-
-        time.sleep(5)
-
-        proc = subprocess.Popen(["feh", "--fullscreen", "anomaly_scores.png"])
-        time.sleep(10)
-        proc.terminate()
-
-        os.system("clear")

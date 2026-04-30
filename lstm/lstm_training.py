@@ -1,6 +1,3 @@
-import subprocess
-import time
-
 import os
 import warnings
 import json
@@ -181,11 +178,3 @@ plt.ylabel("MSE Loss (×10⁻⁵)")
 plt.title("Training Loss")
 plt.savefig("training_loss.png")
 plt.close()
-
-time.sleep(5)
-
-proc = subprocess.Popen(["feh", "--fullscreen", "training_loss.png"])
-time.sleep(10)
-proc.terminate()
-
-os.system("clear")
