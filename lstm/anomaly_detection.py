@@ -1,3 +1,7 @@
+import subprocess
+
+import os
+import warnings
 import json
 import time
 import argparse
@@ -5,6 +9,7 @@ import numpy as np
 import pandas as pd
 import joblib
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 from tensorflow.keras.models import load_model
 
 WINDOW_SIZE = 30
@@ -15,9 +20,14 @@ THRESHOLD_MEMORY  = 70
 THRESHOLD_NET_RX  = 10000
 THRESHOLD_NET_TX  = 50000
 
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+warnings.filterwarnings("ignore")
+
 model = load_model("lstm_model.keras")
 scaler = joblib.load("scaler.pkl")
 FEATURES = joblib.load("feature_order.pkl")
+feature_std = joblib.load("feature_std.pkl")
 threshold_info = joblib.load("threshold_info.pkl")
 LSTM_THRESHOLD = threshold_info["threshold"]
 
@@ -112,7 +122,8 @@ def build_sequences(entries):
 
 def score_window(window):
     prediction = predict_ahead_single(window, PREDICTION_HORIZON)
-    return float(np.mean(np.abs(prediction)))
+    actual = window[-1]
+    return float(np.mean(np.abs(prediction - actual) / feature_std))
 
 def get_alert_status(score, breaches):
     lstm_alert = score > LSTM_THRESHOLD
@@ -145,7 +156,8 @@ def compute_scores_single(windows):
 def compute_scores_batch(windows):
     print("Running batch prediction...")
     predictions = predict_ahead_batch(windows, PREDICTION_HORIZON)
-    scores = np.mean(np.abs(predictions), axis=1)
+    actual = np.array(windows)[:, -1, :]
+    scores = np.mean(np.abs(predictions - actual) / feature_std, axis=1)
     print(f"Scored {len(windows)} windows in batch mode")
     return scores
 
@@ -185,16 +197,84 @@ def write_anomalies(scores, timestamps, entries, outfile="anomalies.log"):
     print(f"Anomalies written to {outfile}")
     print(f"LSTM only: {lstm_count} | Threshold only: {threshold_count} | Hybrid: {hybrid_count}")
 
-def plot_scores(scores, outfile="anomaly_scores.png"):
-    plt.figure(figsize=(14, 5))
-    plt.plot(scores, label="Anomaly Score (1 min ahead)")
-    plt.axhline(LSTM_THRESHOLD, color="red", linestyle="--", linewidth=2, label=f"LSTM Threshold ({LSTM_THRESHOLD:.4f})")
-    plt.title("Predicted Anomaly Scores Over Time (60 Second Lookahead)")
-    plt.xlabel("Window Index")
-    plt.ylabel("Predicted Reconstruction Error")
-    plt.legend()
+def plot_scores(scores, entries, outfile="anomaly_scores.png"):
+    aligned_entries = entries[WINDOW_SIZE:]
+
+    # Pull CPU and memory from aligned entries
+    cpu_values  = [e.get("host", {}).get("cpu_percent",  0) or 0 for e in aligned_entries[:len(scores)]]
+    mem_values  = [e.get("host", {}).get("memory_usage", 0) or 0 for e in aligned_entries[:len(scores)]]
+
+    # Work out alert status for each window
+    alert_statuses = []
+    for i, score in enumerate(scores):
+        entry = aligned_entries[i] if i < len(aligned_entries) else {}
+        breaches = check_thresholds(entry)
+        alert_statuses.append(get_alert_status(score, breaches))
+
+    # Find anomaly indices
+    anomaly_indices = [i for i, s in enumerate(alert_statuses) if s is not None]
+
+    if not anomaly_indices:
+        print("No anomalies detected, skipping graph.")
+        return
+
+    # 5 minutes padding = 60 samples at 5s per sample
+    PADDING = 60
+    start_idx = max(0, anomaly_indices[0] - PADDING)
+    end_idx   = min(len(scores) - 1, anomaly_indices[-1] + PADDING)
+
+    # Slice everything to the window of interest
+    scores_slice   = scores[start_idx:end_idx+1]
+    cpu_slice      = cpu_values[start_idx:end_idx+1]
+    mem_slice      = mem_values[start_idx:end_idx+1]
+    statuses_slice = alert_statuses[start_idx:end_idx+1]
+    x = np.arange(len(scores_slice)) * 5 / 60
+
+    fig, ax1 = plt.subplots(figsize=(16, 7))
+    fig.suptitle("Hybrid Anomaly Detection Results", fontsize=14, fontweight="bold")
+
+    # --- Left y-axis: CPU and Memory ---
+    ax1.plot(x, cpu_slice, color="steelblue", linewidth=1.5, label="CPU %")
+    ax1.plot(x, mem_slice, color="darkorange", linewidth=1.5, label="Memory %")
+    ax1.axhline(THRESHOLD_CPU,    color="steelblue",  linestyle=":", linewidth=1, alpha=0.7, label=f"CPU Threshold ({THRESHOLD_CPU}%)")
+    ax1.axhline(THRESHOLD_MEMORY, color="darkorange", linestyle=":", linewidth=1, alpha=0.7, label=f"Memory Threshold ({THRESHOLD_MEMORY}%)")
+    ax1.set_ylabel("CPU / Memory (%)", color="black")
+    ax1.set_ylim(0, max(max(cpu_slice, default=0), max(mem_slice, default=0), THRESHOLD_CPU, THRESHOLD_MEMORY) * 1.2)
+    ax1.set_xlabel("Time (minutes)")
+    ax1.grid(True, alpha=0.3)
+
+    ax2 = ax1.twinx()
+    ax2.plot(x, scores_slice, color="green", linewidth=1.5, label=f"LSTM Anomaly Score (60s ahead)")
+    ax2.axhline(LSTM_THRESHOLD, color="red", linestyle="--", linewidth=1.5, label=f"LSTM Threshold ({LSTM_THRESHOLD:.4f})")
+    ax2.set_ylabel("LSTM Anomaly Score", color="green")
+    ax2.tick_params(axis="y", labelcolor="green")
+    ax2.set_ylim(0, max(scores_slice) * 1.2)
+
+    for i, status in enumerate(statuses_slice):
+        xi = x[i]
+        xnext = x[i+1] if i + 1 < len(x) else xi + (5/60)
+        if status == "HYBRID_ALERT":
+            ax1.axvspan(xi, xnext, color="red",    alpha=0.15)
+        elif status == "LSTM_ANOMALY":
+            ax1.axvspan(xi, xnext, color="purple", alpha=0.15)
+        elif status == "THRESHOLD_ALERT":
+            ax1.axvspan(xi, xnext, color="orange", alpha=0.15)
+
+    from matplotlib.patches import Patch
+    legend_patches = [
+        Patch(color="red",    alpha=0.5, label="HYBRID_ALERT"),
+        Patch(color="purple", alpha=0.5, label="LSTM_ANOMALY"),
+        Patch(color="orange", alpha=0.5, label="THRESHOLD_ALERT"),
+    ]
+    handles1, labels1 = ax1.get_legend_handles_labels()
+    handles2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(handles1 + handles2 + legend_patches,
+               labels1 + labels2 + [p.get_label() for p in legend_patches],
+               loc="upper left", fontsize=8)
+
     plt.tight_layout()
-    plt.savefig(outfile)
+    plt.savefig(outfile, dpi=150)
+    plt.close()
     print(f"Plot saved to {outfile}")
 
 def run_live(path, outfile="anomalies.log"):
@@ -284,4 +364,12 @@ if __name__ == "__main__":
         print(f"Mean score: {scores.mean():.6f}")
 
         write_anomalies(scores, timestamps, entries)
-        plot_scores(scores)
+        plot_scores(scores, entries)
+
+        time.sleep(5)
+
+        proc = subprocess.Popen(["feh", "--fullscreen", "anomaly_scores.png"])
+        time.sleep(10)
+        proc.terminate()
+
+        os.system("clear")

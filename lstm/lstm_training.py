@@ -1,3 +1,8 @@
+import subprocess
+import time
+
+import os
+import warnings
 import json
 import argparse
 import numpy as np
@@ -10,6 +15,10 @@ import joblib
 
 WINDOW_SIZE = 30
 PREDICTION_HORIZON = 12
+
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+warnings.filterwarnings("ignore")
 
 def load_jsonl(path):
     entries = []
@@ -76,11 +85,26 @@ if constant_features:
     df = df.drop(columns=constant_features)
     ALL_FEATURES = [f for f in ALL_FEATURES if f not in constant_features]
 
+# scaler = MinMaxScaler()
+# scaled = scaler.fit_transform(df)
+
+# Create dummy rows to force the scaler to understand true maximums
+dummy_min = {f: 0.0 for f in ALL_FEATURES}
+dummy_max = {f: 100.0 if 'percent' in f or 'usage' in f else 1000000.0 for f in ALL_FEATURES}
+
+# Temporarily add these extremes to the dataframe to calibrate the scaler
+df_for_scaler = pd.concat([df, pd.DataFrame([dummy_min, dummy_max])], ignore_index=True)
+
 scaler = MinMaxScaler()
-scaled = scaler.fit_transform(df)
+scaler.fit(df_for_scaler)        # Teach the scaler the true 0-100 bounds
+scaled = scaler.transform(df)    # Scale only the actual dataset
+
+feature_std = np.std(scaled, axis=0)
+feature_std[feature_std < 1e-6] = 1e-6
 
 joblib.dump(scaler, "scaler.pkl")
 joblib.dump(ALL_FEATURES, "feature_order.pkl")
+joblib.dump(feature_std, "feature_std.pkl")
 
 def create_sequences(data, window):
     X, y = [], []
@@ -132,7 +156,8 @@ def predict_ahead_batch(windows, horizon):
 
 print("Calculating threshold from training data using recursive predictions...")
 train_predictions = predict_ahead_batch(X_train, PREDICTION_HORIZON)
-train_scores = np.mean(np.abs(train_predictions), axis=1)
+actual = X_train[:, -1, :]
+train_scores = np.mean(np.abs(train_predictions - actual) / feature_std, axis=1)
 
 threshold_mean = float(np.mean(train_scores))
 threshold_std = float(np.std(train_scores))
@@ -146,11 +171,21 @@ joblib.dump({
 
 print(f"Threshold saved: {threshold:.6f} (mean={threshold_mean:.6f}, std={threshold_std:.6f})")
 
-plt.plot(history.history["loss"], label="train_loss")
-plt.plot(history.history["val_loss"], label="val_loss")
+scale = 1e5
+plt.figure(figsize=(10, 5))
+plt.plot([v * scale for v in history.history["loss"]], label="train_loss")
+plt.plot([v * scale for v in history.history["val_loss"]], label="val_loss")
 plt.legend()
 plt.xlabel("Epoch")
-plt.ylabel("MSE Loss")
+plt.ylabel("MSE Loss (×10⁻⁵)")
 plt.title("Training Loss")
 plt.savefig("training_loss.png")
 plt.close()
+
+time.sleep(5)
+
+proc = subprocess.Popen(["feh", "--fullscreen", "training_loss.png"])
+time.sleep(10)
+proc.terminate()
+
+os.system("clear")

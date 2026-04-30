@@ -207,7 +207,8 @@ marimo/_lsp/
 __marimo__/
 
 # LSTM Files
-*.jsonl
 *.pkl
 *.keras
 training_loss.png
+anomaly_scores.png
+collect_stressed.sh
